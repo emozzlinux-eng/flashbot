@@ -83,9 +83,7 @@ class ConfirmLive(ModalScreen[bool]):
 
     CSS = """
     ConfirmLive { align: center middle; }
-    #box { width: 60; height: auto; padding: 1 2; border: thick red; background: $panel; }
-    #box Label { margin: 0 1; }
-    .yes { color: bold white on dark_red; }
+    #box { width: 64; height: auto; padding: 1 2; border: thick red; background: $surface; }
     """
 
     def __init__(self, summary: str):
@@ -106,6 +104,52 @@ class ConfirmLive(ModalScreen[bool]):
 
     def on_key(self, event):
         self.dismiss(event.key == "y")
+
+
+class HelpScreen(ModalScreen):
+    """Press ? — plain-language overview, no docs needed."""
+
+    CSS = """
+    HelpScreen { align: center middle; }
+    #helpbox { width: 72; height: auto; max-height: 90%; padding: 1 2;
+               border: round $primary; background: $surface; }
+    """
+
+    TEXT = """[bold]FlashArb dashboard[/]
+
+[bold cyan]What you see[/]
+ • Left: ranked arbitrage routes found in the last scan.
+   [green]green[/] net = above your threshold, yellow = below.
+ • Right: event log of everything the bot did.
+ • Top line: chain, block, gas, mode, session stats.
+
+[bold cyan]Modes[/]
+ [bold yellow]DRY RUN[/]  scans + simulates only, never spends money. Safe default.
+ [bold red]LIVE[/]      sends real transactions. Needs FLASHARB_ADDRESS and
+              PRIVATE_KEY in .env, plus an explicit 'y' confirmation.
+              Auto-disables if cumulative gas losses hit the cap.
+
+[bold cyan]Keys[/]
+   s        start / pause scanning
+   r        scan right now (ignore the poll interval)
+   enter    eth_call-simulate the selected route (free, even while paused)
+   f        filter the table by token symbol (esc clears)
+   t        cycle the minimum-profit threshold
+   l        toggle DRY RUN <-> LIVE (confirmation required)
+   q        quit
+
+[bold cyan]Tips[/]
+ • Empty table is normal — real arb windows are rare.
+ • A passed simulation is not a guaranteed profit; the chain decides.
+ • Check config.json addresses before trusting any numbers.
+
+Press any key to close."""
+
+    def compose(self) -> ComposeResult:
+        yield Static(Text.from_markup(self.TEXT), id="helpbox")
+
+    def on_key(self, event):
+        self.dismiss()
 
 
 class StatusBar(Static):
@@ -147,6 +191,7 @@ class ArbTUI(App):
         ("r", "force_cycle", "Scan now"),
         ("f", "show_filter", "Filter token"),
         ("t", "cycle_threshold", "Threshold"),
+        ("?", "help", "Help"),
     ]
 
     THRESHOLDS_FACTOR = [0.5, 1, 2, 5]  # multiples of config default
@@ -199,10 +244,13 @@ class ArbTUI(App):
         logging.getLogger().setLevel(logging.INFO)
         self.set_interval(1.0, self._tick)
         self.query_one("#hint", Static).update(
-            Text("↑↓ pick · enter sim · f filter · t threshold · s pause · r scan · l live", style="dim")
+            Text("↑↓ pick · enter sim · f filter · t thr · s pause · r scan · l live · ? help", style="dim")
         )
         self.push_log(f"chain={self.chain_name}  dexes={len(self.cfg['dexes'])}  "
                       f"poll={self.cfg['poll_seconds']}s", logging.INFO)
+        if not os.environ.get("FLASHARB_ADDRESS"):
+            self.push_log("tip: set FLASHARB_ADDRESS + PRIVATE_KEY in .env to enable "
+                          "simulation and LIVE. Press ? for help.", logging.INFO)
         self.run_worker(self._startup(), exclusive=True)
 
     def on_key(self, event):
@@ -249,7 +297,9 @@ class ArbTUI(App):
             self.w3 = connect(self.cfg)
             self.engine, _ = make_engine(self.cfg, self.w3)
             self.push_log("connecting… loading pool cache (first run may take a while)", logging.INFO)
+            t0 = time.time()
             await self._run_in_thread(self.engine.load)
+            self.push_log(f"pool cache ready ({time.time() - t0:.1f}s)", logging.INFO)
             contract = os.environ.get("FLASHARB_ADDRESS")
             if contract:
                 key = os.environ.get("PRIVATE_KEY") if self.live_cli else None
@@ -264,6 +314,8 @@ class ArbTUI(App):
             self.push_log(str(exc), logging.ERROR)
         except Exception as exc:
             self.push_log(f"startup failed: {exc}", logging.ERROR)
+            self.push_log("check RPC_URL in .env and 'chain' in config.json, then restart (q)",
+                          logging.ERROR)
 
     def _run_in_thread(self, fn, *args):
         import anyio
@@ -339,7 +391,12 @@ class ArbTUI(App):
                           f"{o.gross_wei / NATIVE:.6f}", f"{o.gas_wei / NATIVE:.6f}",
                           Text(f"{o.net_wei / NATIVE:.6f}", style=style), usd_txt)
         if not self.shown_opps:
-            msg = "(none above threshold)" if not flt else f"(no routes matching '{flt}')"
+            if flt:
+                msg = f"(no routes matching '{flt}' — press esc to clear filter)"
+            elif self.cycles == 0:
+                msg = "(waiting for first scan…)"
+            else:
+                msg = "(nothing yet — normal! arbs are rare. try 't' to lower the threshold)"
             table.add_row(msg, "", "", "", "", "", "")
         if row0 is not None and self.shown_opps:
             table.move_cursor(row=min(row0, len(self.shown_opps) - 1))
@@ -413,6 +470,9 @@ class ArbTUI(App):
             self.push_log(f"manual sim PASSED (gas {gas}): {self.engine.describe(opp)}", logging.INFO)
         else:
             self.push_log(f"manual sim reverted: {err}", logging.WARNING)
+
+    def action_help(self):
+        self.push_screen(HelpScreen())
 
     def action_quit(self):
         self.exit()
