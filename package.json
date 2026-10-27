@@ -1,0 +1,11 @@
+{
+  "name": "flashbot-contracts",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "compile": "node scripts/compile.js"
+  },
+  "dependencies": {
+    "solc": "^0.8.26"
+  }
+}
